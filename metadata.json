@@ -1,0 +1,5 @@
+{
+  "name": "Gemini Grounded RAG",
+  "description": "A secure, client-side Retrieval-Augmented Generation (RAG) system. Upload PDF, Word, Excel, or Text files, and chat with Gemini 3 Pro using only the information found strictly within your documents.",
+  "requestFramePermissions": []
+}

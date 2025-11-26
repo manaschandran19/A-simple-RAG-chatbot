@@ -16,14 +16,14 @@ graph TD
         UI[React UI]
         
         subgraph Ingestion ["Ingestion Pipeline"]
-            Parser[File Parsers<br/>(PDF.js, Mammoth, XLSX)]
+            Parser["File Parsers\n(PDF.js, Mammoth, XLSX)"]
             Chunker[Text Chunker]
-            Store[IndexedDB<br/>(Vector Store)]
+            Store["IndexedDB\n(Vector Store)"]
         end
         
         subgraph Retrieval ["Retrieval Engine"]
             QueryProc[Query Processor]
-            VectorSearch[Cosine Similarity<br/>(JavaScript Math)]
+            VectorSearch["Cosine Similarity\n(JavaScript Math)"]
         end
         
         UI -->|File Drop| Parser
@@ -42,9 +42,8 @@ graph TD
         API_Embed[text-embedding-004]
         API_Gen[gemini-3-pro-preview]
     end
-
-    API_Gen -->|Grounded Response| UI
 ```
+   
 
 ---
 

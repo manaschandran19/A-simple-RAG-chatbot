@@ -1,5 +1,6 @@
 import { GoogleGenAI, EmbedContentResponse } from "@google/genai";
 import { TextChunk, SourceCitation } from '../types';
+import { db } from './db';
 
 // Initialize Gemini Client
 const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -9,43 +10,71 @@ const EMBEDDING_MODEL = 'text-embedding-004';
 const GENERATION_MODEL = 'gemini-3-pro-preview';
 
 /**
- * Generate embedding for a single text string.
+ * Generate embedding for a single text string with retry logic.
  */
 export const generateEmbedding = async (text: string): Promise<number[]> => {
-  try {
-    const response: EmbedContentResponse = await ai.models.embedContent({
-      model: EMBEDDING_MODEL,
-      contents: text,
-    });
-    
-    // Access the embeddings array. Since we sent a single text content, we expect the first embedding.
-    const embedding = response.embeddings?.[0];
-    
-    if (!embedding || !embedding.values) {
-      throw new Error("No embedding returned");
+  // 1. Validate Input
+  if (!text || text.trim().length === 0) {
+    throw new Error("Cannot embed empty text");
+  }
+
+  // 2. Retry Logic
+  const maxRetries = 3;
+  let attempt = 0;
+
+  while (true) {
+    try {
+      const response: EmbedContentResponse = await ai.models.embedContent({
+        model: EMBEDDING_MODEL,
+        contents: text,
+      });
+      
+      // Access the embeddings array.
+      const embedding = response.embeddings?.[0];
+      
+      if (!embedding || !embedding.values) {
+        throw new Error("No embedding returned from API");
+      }
+      return embedding.values;
+    } catch (error: any) {
+      attempt++;
+      
+      // Check if error is a transient 500/Internal error
+      const isInternalError = 
+        error.status === 500 || 
+        error.code === 500 || 
+        error.status === 'INTERNAL' ||
+        (error.message && error.message.includes('Internal error'));
+
+      if (isInternalError && attempt <= maxRetries) {
+        const delay = Math.pow(2, attempt) * 1000; // 2s, 4s, 8s
+        console.warn(`Embedding API 500 Error (Attempt ${attempt}/${maxRetries}). Retrying in ${delay}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+        continue;
+      }
+
+      // If not retryable or max retries reached, throw
+      console.error("Embedding generation failed permanently:", error);
+      throw error;
     }
-    return embedding.values;
-  } catch (error) {
-    console.error("Embedding generation failed:", error);
-    throw error;
   }
 };
 
 /**
- * Batch process embeddings to avoid hitting rate limits too aggressively.
- * (Simple sequential implementation for client-side demo)
+ * Batch process embeddings
  */
 export const embedChunks = async (chunks: TextChunk[]): Promise<TextChunk[]> => {
   const embeddedChunks: TextChunk[] = [];
   
-  // Process in small batches or sequentially to ensure stability
   for (const chunk of chunks) {
     try {
+      // Small delay between requests to avoid hitting rate limits (429) too hard
+      await new Promise(resolve => setTimeout(resolve, 100)); 
+      
       const embedding = await generateEmbedding(chunk.text);
       embeddedChunks.push({ ...chunk, embedding });
-      // Small delay to be polite to the API in a loop
-      await new Promise(resolve => setTimeout(resolve, 50)); 
     } catch (e) {
+      // Log but continue processing other chunks so one failure doesn't stop the whole file
       console.warn(`Failed to embed chunk ${chunk.id}`, e);
     }
   }
@@ -68,13 +97,21 @@ const cosineSimilarity = (vecA: number[], vecB: number[]): number => {
 };
 
 /**
- * Retrieve top K most relevant chunks
+ * Retrieve top K most relevant chunks from Database
  */
-export const retrieveContext = async (query: string, chunks: TextChunk[], topK: number = 5): Promise<SourceCitation[]> => {
-  if (chunks.length === 0) return [];
+export const retrieveContext = async (query: string, userId: string, topK: number = 10): Promise<SourceCitation[]> => {
   
+  // 1. Generate Query Vector
   const queryEmbedding = await generateEmbedding(query);
   
+  // 2. Fetch ALL vectors for this user from the Database
+  // In a production Vector DB, the DB would handle the similarity search.
+  // Since we are using IndexedDB as a local Vector DB, we fetch and calculate here.
+  const chunks = await db.getAllVectorsByUser(userId);
+
+  if (chunks.length === 0) return [];
+
+  // 3. Compute Scores
   const scoredChunks = chunks.map(chunk => {
     if (!chunk.embedding) return { ...chunk, score: -1 };
     return {
@@ -83,11 +120,11 @@ export const retrieveContext = async (query: string, chunks: TextChunk[], topK: 
     };
   });
 
-  // Sort by score descending
+  // 4. Sort and Top-K
   scoredChunks.sort((a, b) => b.score - a.score);
   
-  // Filter for relevance threshold (simple heuristic)
-  const relevant = scoredChunks.filter(c => c.score > 0.45).slice(0, topK);
+  // Lower threshold slightly to ensure we capture potentially relevant context that uses synonyms
+  const relevant = scoredChunks.filter(c => c.score > 0.30).slice(0, topK);
 
   return relevant.map(c => ({
     documentName: c.documentName,
@@ -101,61 +138,28 @@ export const retrieveContext = async (query: string, chunks: TextChunk[], topK: 
  */
 export const generateRAGResponse = async (query: string, context: SourceCitation[]): Promise<string> => {
   
-  // If no context is found, return the fallback immediately to save a call or strictly enforce.
-  // However, we let the model decide if the little context it has is enough, 
-  // but we guide it strongly.
-  
-  const contextText = context.map((c, i) => `[Document: ${c.documentName} (Snippet ${i+1})]\n${c.snippet}`).join("\n\n");
+  // Format context for the prompt
+  const contextText = context.map((c, i) => `[[Source: ${c.documentName}]]\n${c.snippet}`).join("\n\n");
   
   const systemInstruction = `
-    System Role:
-You are a Retrieval-Augmented Generation (RAG) assistant. You must answer the user’s question strictly and exclusively using the information contained in the Provided Context.
+You are an expert document analysis assistant. Your goal is to answer the user's question accurately, comprehensively, and strictly using *only* the provided context chunks.
 
-Core Obligations
-
-Use ONLY the Provided Context.
-
-Do not rely on prior knowledge, assumptions, or external facts.
-
-Do not infer information that is not explicitly present.
-
-If the answer is not fully supported by the Context:
-Respond with:
-“I couldn’t find this information in the provided documents.”
-
-Cite the Context sources clearly for every factual claim.
-
-Example: “According to Document A…”
-
-Use the document names or IDs exactly as given.
-
-Stay accurate, concise, and professional.
-
-Do NOT hallucinate or combine partial hints into unsupported conclusions.
-
-Response Format
-
-Direct Answer: Only what is supported by the Context.
-
-Citations: Mention supporting document names/IDs.
-
-If insufficient information: Use the required fallback sentence.
-
-Example Behavior
-
-Good:
-“According to Policy.pdf, the reimbursement limit is ₹50,000.”
-
-Bad:
-“It’s likely the reimbursement limit is around ₹50,000 based on typical policies.” (❌ Inference)
+### Core Instructions:
+1. **Synthesis**: Do not just list snippets. Analyze the provided text and synthesize a coherent, flowing answer that directly addresses the user's intent. combine information from different chunks if needed.
+2. **Strict Grounding**: Use ONLY the information provided in the "Context" section below. Do not use outside knowledge or make assumptions. 
+3. **Handling Missing Info**: If the context does not contain enough information to answer the specific question, explicitly state: "I couldn't find specific information regarding [topic] in the provided documents."
+4. **Citations**: You must cite your sources. When you mention a fact, derived from a document, reference the source filename in brackets immediately after the statement (e.g., "The standard plan includes dental coverage [Benefits.pdf].").
+5. **Tone**: Be professional, helpful, empathetic and  direct.
   `;
 
   const prompt = `
-    Context:
-    ${contextText.length > 0 ? contextText : "No relevant documents found."}
+### Context Data (Trusted Knowledge Base):
+${contextText.length > 0 ? contextText : "No relevant documents found matching the query."}
 
-    User Question: 
-    ${query}
+### User Question: 
+${query}
+
+### Answer:
   `;
 
   try {
@@ -164,7 +168,7 @@ Bad:
       contents: prompt,
       config: {
         systemInstruction: systemInstruction,
-        temperature: 0.1, // Low temperature for factual accuracy
+        temperature: 0.3, // Slightly increased to allow better synthesis while remaining grounded
       }
     });
 

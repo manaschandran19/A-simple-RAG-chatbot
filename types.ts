@@ -1,5 +1,12 @@
+export interface User {
+  username: string;
+  passwordHash: string; // SHA-256
+  createdAt: number;
+}
+
 export interface FileDocument {
   id: string;
+  ownerId: string; // Scoped to user
   name: string;
   type: string;
   content: string; // Full extracted text
@@ -44,5 +51,6 @@ declare global {
     pdfjsLib: any;
     mammoth: any;
     XLSX: any;
+    idb: any;
   }
 }

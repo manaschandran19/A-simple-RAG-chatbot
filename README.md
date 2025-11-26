@@ -10,7 +10,7 @@ This application runs **entirely in the browser**, using IndexedDB as a local Ve
 
 Unlike traditional RAG applications that rely on Python backends (LangChain/LlamaIndex) and external Vector Databases (Pinecone/Chroma), this application is a self-contained "AI Vault" running inside your web browser.
 
-
+```mermaid
 graph TD
     subgraph Browser ["Browser Sandbox (Client-Side)"]
         UI[React UI]
@@ -44,7 +44,7 @@ graph TD
     end
 
     API_Gen -->|Grounded Response| UI
-
+```
 
 ---
 
